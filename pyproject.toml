@@ -9,6 +9,7 @@ dependencies = [
     "transformers == 4.29.2",
     "matplotlib",
     "accelerate == 0.31.0",
+    "einops",
     "wandb == 0.14.2",
     "h5py",
     "pandas",
