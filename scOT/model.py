@@ -53,10 +53,6 @@ from typing import Optional, Union, Tuple, List
 import math
 import collections
 
-from einops import rearrange, repeat
-from einops.layers.torch import Rearrange
-
-
 @dataclass
 class ScOTOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
@@ -1501,61 +1497,3 @@ class ScOT(Swinv2PreTrainedModel):
                 else None
             ),
         )
-
-
-# Taken and modified from the DPOT repo: DPOT/models/dpot.py
-# https://github.com/HaoZhongkai/DPOT
-class PatchEmbed(nn.Module):
-    def __init__(self, img_size=(128,128), patch_size=(16,16), in_chans=3, embed_dim=768, out_dim=128,act='gelu'):
-        super().__init__()
-        # img_size = to_2tuple(img_size)
-        # patch_size = to_2tuple(patch_size)
-        # img_size = (img_size, img_size)
-        # patch_size = (patch_size, patch_size)
-        assert type(img_size) is tuple, 'img_size must be provided as a tuple, got {}'.format(type(img_size))
-        assert type(patch_size) is tuple, 'patch_size must be provided as a tuple, got {}'.format(type(patch_size))
-
-        num_patches         = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
-        self.img_size       = img_size
-        self.patch_size     = patch_size
-        self.num_patches    = num_patches
-        self.out_size       = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
-        self.out_dim        = out_dim
-        self.act            = get_activation(act)
-        self.proj = nn.Sequential(
-            nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size),
-            self.act,
-            nn.Conv2d(embed_dim, out_dim, kernel_size=1, stride=1)
-        )
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        assert H == self.img_size[0] and W == self.img_size[1], f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        # x = self.proj(x).flatten(2).transpose(1, 2)
-        x = self.proj(x)
-        return x
-
-# Taken and modified from the DPOT repo: DPOT/models/dpot.py
-# https://github.com/HaoZhongkai/DPOT
-class TimeAggregator(nn.Module):
-    def __init__(self, n_channels, n_timesteps, out_channels, type='mlp'):
-        super(TimeAggregator, self).__init__()
-        self.n_channels     = n_channels
-        self.n_timesteps    = n_timesteps
-        self.out_channels   = out_channels
-        self.type           = type
-        if self.type == 'mlp':
-            self.w = nn.Parameter(1/(n_timesteps * out_channels**0.5) *torch.randn(n_timesteps, out_channels, out_channels),requires_grad=True)   # initialization could be tuned
-        elif self.type == 'exp_mlp':
-            self.w = nn.Parameter(1/(n_timesteps * out_channels**0.5) *torch.randn(n_timesteps, out_channels, out_channels),requires_grad=True)   # initialization could be tuned
-            self.gamma = nn.Parameter(2**torch.linspace(-10,10, out_channels).unsqueeze(0),requires_grad=True)  # 1, C
-    ##  B, X, Y, T, C
-    def forward(self, x):
-        if self.type == 'mlp':
-            x = torch.einsum('tij, ...ti->...j', self.w, x)
-        elif self.type == 'exp_mlp':
-            t = torch.linspace(0, 1, x.shape[-2]).unsqueeze(-1).to(x.device) # T, 1
-            t_embed = torch.cos(t @ self.gamma)
-            x = torch.einsum('tij,...ti->...j', self.w, x * t_embed)
-
-        return x
