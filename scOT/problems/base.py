@@ -158,6 +158,7 @@ def get_dataset(dataset, **kwargs):
     else:
         raise ValueError(f"Unknown dataset {dataset}")
 
+    print("DATASET", dataset)
     return dset(**kwargs) if ".time" not in dataset else TimeWrapper(dset(**kwargs))
 
 

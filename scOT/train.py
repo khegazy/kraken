@@ -192,6 +192,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Set this if you have to replace the embeddings and recovery layers because you are not just using the density, velocity and pressure channels. Only relevant for finetuning.",
     )
+    parser.add_argument(
+        "--residual_model",
+        type=str,
+        default="convnext",
+        help="Residual model",
+    )
+
     params = read_cli(parser).parse_args()
     run, config, ckpt_dir, RANK, CPU_CORES = setup(params)
 
@@ -266,7 +273,7 @@ if __name__ == "__main__":
             layer_norm_eps=1e-5,
             p=1,
             channel_slice_list_normalized_loss=channel_slice_list,
-            residual_model="convnext",
+            residual_model=config["residual_model"],
             use_conditioning=time_involved,
             learn_residual=False,
         )

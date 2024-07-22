@@ -2,10 +2,32 @@ import torch
 import torch.nn as nn
 import numpy as np
 from math import sqrt
-from utils.masking import TriangularCausalMask, ProbMask
-from reformer_pytorch import LSHSelfAttention
 from einops import rearrange
 
+
+
+class TriangularCausalMask():
+    def __init__(self, B, L, device="cpu"):
+        mask_shape = [B, 1, L, L]
+        with torch.no_grad():
+            self._mask = torch.triu(torch.ones(mask_shape, dtype=torch.bool), diagonal=1).to(device)
+
+    @property
+    def mask(self):
+        return self._mask
+
+class ProbMask():
+    def __init__(self, B, H, L, index, scores, device="cpu"):
+        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).to(device).triu(1)
+        _mask_ex = _mask[None, None, :].expand(B, H, L, scores.shape[-1])
+        indicator = _mask_ex[torch.arange(B)[:, None, None],
+                    torch.arange(H)[None, :, None],
+                    index, :].to(device)
+        self._mask = indicator.view(scores.shape).to(device)
+
+    @property
+    def mask(self):
+        return self._mask
 
 # Code implementation from https://github.com/thuml/Flowformer
 class FlowAttention(nn.Module):
@@ -132,7 +154,7 @@ class FlashAttention(nn.Module):
 
 
 class FullAttention(nn.Module):
-    def __init__(self, mask_flag=True, factor=5, scale=None, attention_dropout=0.1, output_attention=False):
+    def __init__(self, mask_flag=True, scale=None, attention_dropout=0.1, output_attention=False):
         super(FullAttention, self).__init__()
         self.scale = scale
         self.mask_flag = mask_flag
@@ -144,7 +166,9 @@ class FullAttention(nn.Module):
         _, S, _, D = values.shape
         scale = self.scale or 1. / sqrt(E)
 
+        print("WTF", queries.shape, keys.shape) 
         scores = torch.einsum("blhe,bshe->bhls", queries, keys)
+        print("CHECK IF RIGHT SIZE", scores.shape)
 
         if self.mask_flag:
             if attn_mask is None:
@@ -279,6 +303,7 @@ class AttentionLayer(nn.Module):
         self.n_heads = n_heads
 
     def forward(self, queries, keys, values, attn_mask, tau=None, delta=None):
+        print("ATTENTINO SHAPE, CHECK IF RIGHT ORDER", queries.shape, keys.shape, values.shape)
         B, L, _ = queries.shape
         _, S, _ = keys.shape
         H = self.n_heads
@@ -286,6 +311,7 @@ class AttentionLayer(nn.Module):
         queries = self.query_projection(queries).view(B, L, H, -1)
         keys = self.key_projection(keys).view(B, S, H, -1)
         values = self.value_projection(values).view(B, S, H, -1)
+        print("AFTER KQV", queries.shape, keys.shape, values.shape)
 
         out, attn = self.inner_attention(
             queries,
@@ -298,33 +324,3 @@ class AttentionLayer(nn.Module):
         out = out.view(B, L, -1)
 
         return self.out_projection(out), attn
-
-
-class ReformerLayer(nn.Module):
-    def __init__(self, attention, d_model, n_heads, d_keys=None,
-                 d_values=None, causal=False, bucket_size=4, n_hashes=4):
-        super().__init__()
-        self.bucket_size = bucket_size
-        self.attn = LSHSelfAttention(
-            dim=d_model,
-            heads=n_heads,
-            bucket_size=bucket_size,
-            n_hashes=n_hashes,
-            causal=causal
-        )
-
-    def fit_length(self, queries):
-        # inside reformer: assert N % (bucket_size * 2) == 0
-        B, N, C = queries.shape
-        if N % (self.bucket_size * 2) == 0:
-            return queries
-        else:
-            # fill the time series
-            fill_len = (self.bucket_size * 2) - (N % (self.bucket_size * 2))
-            return torch.cat([queries, torch.zeros([B, fill_len, C]).to(queries.device)], dim=1)
-
-    def forward(self, queries, keys, values, attn_mask, tau, delta):
-        # in Reformer: defalut queries=keys
-        B, N, C = queries.shape
-        queries = self.attn(self.fit_length(queries))[:, :N, :]
-        return queries, None

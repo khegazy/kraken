@@ -1,42 +1,36 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from .layers.transformer import Decoder, DecoderLayer, Encoder, EncoderLayer, ConvLayer
-from .layers.self_attention import FullAttention, AttentionLayer
-from .layers.embed_transformer import DataEmbedding
+from scOT.layers.transformer import Decoder, DecoderLayer, Encoder, EncoderLayer, ConvLayer
+from scOT.layers.self_attention import FullAttention, AttentionLayer
 
 class TransformerTS(nn.Module):
-    def __init__(self, configs):
+    def __init__(self, configs, embed_dim, drop_path=0.0, layer_scale_init_value=1e-6):
         super().__init__()
-        self.pred_len = configs.pred_len
-        self.output_attention = configs.output_attention
+        print("TODO, add time dependence in transformerTS to layer norm")
+        #self.output_attention = configs.output_attention
+        self.output_attention = False
 
-        if configs.channel_independence:
-            self.enc_in = 1
-            self.dec_in = 1
-            self.c_out = 1
-        else:
-            self.enc_in = configs.enc_in
-            self.dec_in = configs.dec_in
-            self.c_out = configs.c_out
-
-        # Embedding
-        self.enc_embedding = DataEmbedding(self.enc_in, configs.d_model, configs.embed, configs.freq,
-                                           configs.dropout)
         # Encoder
         self.encoder = Encoder(
             [
                 EncoderLayer(
                     AttentionLayer(
-                        FullAttention(False, configs.factor, attention_dropout=configs.dropout,
-                                      output_attention=configs.output_attention), configs.d_model, configs.n_heads),
-                    configs.d_model,
-                    configs.d_ff,
-                    dropout=configs.dropout,
-                    activation=configs.activation
-                ) for l in range(configs.e_layers)
+                        FullAttention(mask_flag=False, attention_dropout=configs.hidden_dropout_prob,
+                                      output_attention=self.output_attention), embed_dim, configs.num_res_attn_heads),
+                    embed_dim,
+                    embed_dim,
+                    dropout=configs.hidden_dropout_prob,
+                    activation="relu"
+                ) for l in range(configs.num_residual_layers)
             ],
-            norm_layer=torch.nn.LayerNorm(configs.d_model)
+            norm_layer=torch.nn.LayerNorm(embed_dim)
         )
+    
+    def forward(self, x, time):
+        print("INPUT ATTN", x.shape)
+        enc_out, attns = self.encoder(x, attn_mask=None)
+        print("OUTPUT ATTN", enc_out.shape)
+        return enc_out
 
 

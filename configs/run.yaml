@@ -1,9 +1,11 @@
 dataset:
-  value: "wave.Layer"
+  value: "fluids.compressible.Gaussians"
 num_trajectories:
   value: 128
 model_name:
   value: "B"
+residual_model:
+  value: "transformer"
 lr:
   value: 0.00005
 lr_embedding_recovery:
@@ -21,6 +23,6 @@ early_stopping_patience:
 num_epochs:
   value: 200
 batch_size:
-  value: 40
+  value: 9
 max_grad_norm:
   value: 5.0
