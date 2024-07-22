@@ -150,6 +150,81 @@ class ScOTConfig(PretrainedConfig):
         self.residual_model = residual_model
 
 
+
+class ScOTConfigTimeAggregate(PretrainedConfig):
+    """https://github.com/huggingface/transformers/blob/v4.35.2/src/transformers/models/swinv2/configuration_swinv2.py"""
+
+    model_type = "swinv2"
+
+    attribute_map = {
+        "num_attention_heads": "num_heads",
+        "num_hidden_layers": "num_layers",
+    }
+
+    def __init__(
+        self,
+        image_size          = 224,
+        patch_size          = 4,
+        num_channels        = 3,        # number of input channels
+        num_out_channels    = 1,        # number of channels output from embedding layer
+        num_timesteps       = 10,       # number of input timesteps
+        time_agg_type       = 'mlp',    # 'mlp' or 'exp_mlp', whether or not to include exponential weighting on 
+        embed_dim           = 96,
+        depths              = [2, 2, 6, 2],
+        num_heads           = [3, 6, 12, 24],
+        skip_connections    = [True, True, True],
+        window_size         = 7,
+        mlp_ratio           = 4.0,
+        qkv_bias            = True,
+        hidden_dropout_prob = 0.0,
+        attention_probs_dropout_prob = 0.0,
+        drop_path_rate      = 0.1,
+        hidden_act          = "gelu",
+        use_absolute_embeddings = False,
+        initializer_range   = 0.02,
+        layer_norm_eps      = 1e-5,
+        p                   = 1,  # for loss: 1 for l1, 2 for l2
+        channel_slice_list_normalized_loss=None,  # if None will fall back to absolute loss otherwise normalized loss with split channels
+        residual_model="convnext",  # "convnext" or "resnet"
+        use_conditioning=False,
+        learn_residual=False,  # learn the residual for time-dependent problems
+
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.num_channels = num_channels
+        self.num_timesteps = num_timesteps
+        self.embed_dim = embed_dim
+        self.depths = depths
+        self.num_layers = len(depths)
+        self.num_heads = num_heads
+        self.skip_connections = skip_connections
+        self.window_size = window_size
+        self.mlp_ratio = mlp_ratio
+        self.qkv_bias = qkv_bias
+        self.hidden_dropout_prob = hidden_dropout_prob
+        self.attention_probs_dropout_prob = attention_probs_dropout_prob
+        self.drop_path_rate = drop_path_rate
+        self.hidden_act = hidden_act
+        self.use_absolute_embeddings = use_absolute_embeddings
+        self.use_conditioning = use_conditioning
+        self.learn_residual = learn_residual if self.use_conditioning else False
+        self.layer_norm_eps = layer_norm_eps
+        self.initializer_range = initializer_range
+        # we set the hidden_size attribute in order to make Swinv2 work with VisionEncoderDecoderModel
+        # this indicates the channel dimension after the last stage of the model
+        self.hidden_size = int(embed_dim * 2 ** (len(depths) - 1))
+        self.pretrained_window_sizes = (0, 0, 0, 0)
+        self.num_out_channels = num_out_channels
+        self.p = p
+        self.channel_slice_list_normalized_loss = channel_slice_list_normalized_loss
+        self.residual_model = residual_model
+
+
+
 class LayerNorm(nn.LayerNorm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1505,7 +1580,7 @@ class ScOT(Swinv2PreTrainedModel):
 
 # Taken and modified from the DPOT repo: DPOT/models/dpot.py
 # https://github.com/HaoZhongkai/DPOT
-class PatchEmbed(nn.Module):
+class DPOTPatchEmbed(nn.Module):
     def __init__(self, img_size=(128,128), patch_size=(16,16), in_chans=3, embed_dim=768, out_dim=128,act='gelu'):
         super().__init__()
         # img_size = to_2tuple(img_size)
@@ -1537,9 +1612,9 @@ class PatchEmbed(nn.Module):
 
 # Taken and modified from the DPOT repo: DPOT/models/dpot.py
 # https://github.com/HaoZhongkai/DPOT
-class TimeAggregator(nn.Module):
+class DPOTTimeAggregator(nn.Module):
     def __init__(self, n_channels, n_timesteps, out_channels, type='mlp'):
-        super(TimeAggregator, self).__init__()
+        super(DPOTTimeAggregator, self).__init__()
         self.n_channels     = n_channels
         self.n_timesteps    = n_timesteps
         self.out_channels   = out_channels
@@ -1559,3 +1634,66 @@ class TimeAggregator(nn.Module):
             x = torch.einsum('tij,...ti->...j', self.w, x * t_embed)
 
         return x
+    
+class DPOTPatchTimeAggregate(nn.Module):
+    ## TODO: add 'maybe_patch' function
+    ## TODO: add grid coordinates as inputs?
+    def __init__(   self, 
+                    image_size,
+                    patch_size,
+                    embed_dim,
+                    in_channels,
+                    num_timesteps,
+                    activation,
+                    time_agg_type = 'mlp',
+                    **kwargs,):
+        super().__init__(**kwargs)
+
+        image_size = (
+            image_size
+            if isinstance(image_size, collections.abc.Iterable)
+            else (image_size, image_size)
+        )
+        patch_size = (
+            patch_size
+            if isinstance(patch_size, collections.abc.Iterable)
+            else (patch_size, patch_size)
+        )
+        num_patches = (image_size[1] // patch_size[1]) * (
+            image_size[0] // patch_size[0]
+        )
+
+        self.image_size         = image_size
+        self.patch_size         = patch_size
+        self.out_channels_patch = embed_dim
+        self.in_channels        = in_channels
+        self.num_timesteps      = num_timesteps
+        self.activation         = activation
+        self.time_agg_type      = time_agg_type
+
+        self.patch = DPOTPatchEmbed(    img_size    = self.image_size,
+                                        patch_size  = self.patch_size,
+                                        in_chans    = self.in_channels,
+                                        embed_dim   = self.embed_dim,
+                                        out_dim     = self.embed_dim,
+                                        act         = self.activation, )
+        
+        self.timeAggregate = DPOTPatchTimeAggregate( 
+            n_channels      = self.in_channels,
+            n_timesteps     = self.num_timesteps,
+            out_channels    = self.embed_dim,
+            type            = self.time_agg_type, 
+        )
+
+    def forward(self, x):
+        '''Patch embed and time aggregate, assume input x has shape (B x W x H x T x C)
+        '''
+        n_batch     = x.shape[0]
+        x           = rearrange( x, 'b x y t c -> (b t) c x y')
+        patch_out   = self.patch(x)
+        patch_out   = rearrange( patch_out, '(b t) c x y -> b x y t c', b=n_batch, t=self.num_timesteps)
+
+        tagg_out    = self.timeAggregate(patch_out)
+        return tagg_out
+
+
