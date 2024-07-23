@@ -163,10 +163,10 @@ class ScOTConfigTimeAggregate(PretrainedConfig):
 
     def __init__(
         self,
-        image_size          = 224,
+        image_size          = 128,
         patch_size          = 4,
-        num_channels        = 3,        # number of input channels
-        num_out_channels    = 1,        # number of channels output from first cnn embedding layer
+        num_channels        = 4,        # number of input channels
+        num_out_channels    = 4,        # number of output channels for prediction
         num_timesteps       = 10,       # number of input timesteps
         time_agg_type       = 'mlp',    # 'mlp' or 'exp_mlp', whether or not to include exponential weighting on 
         embed_dim           = 96,       # embedding dimension output from patching/time aggregator
@@ -1660,8 +1660,11 @@ class DPOTPatchTimeAggregate(nn.Module):
             if isinstance(patch_size, collections.abc.Iterable)
             else (patch_size, patch_size)
         )
-        num_patches = (image_size[1] // patch_size[1]) * (
-            image_size[0] // patch_size[0]
+        self.n_patches = tuple([int(image_size[i] / patch_size[i]) for i  in range(len(image_size)) ])
+        
+        self.patch_grid = (
+            image_size[0] // patch_size[0],
+            image_size[1] // patch_size[1],
         )
 
         self.image_size         = image_size
@@ -1687,14 +1690,302 @@ class DPOTPatchTimeAggregate(nn.Module):
             type            = self.time_agg_type,)
 
     def forward(self, x):
-        '''Patch embed and time aggregate, assume input x has shape (B x W x H x T x C)
+        '''Patch embed and time aggregate, assume input x has shape (B x C x W x H x T)
         '''
         n_batch     = x.shape[0]
-        x           = rearrange( x, 'b x y t c -> (b t) c x y')
+        x           = rearrange( x, 'b c x y t -> (b t) c x y')
         patch_out   = self.patch(x)
-        patch_out   = rearrange( patch_out, '(b t) c x y -> b x y t c', b=n_batch, t=self.num_timesteps)
+        patch_out   = rearrange( patch_out, '(b t) c x y -> b (x y) t c', b=n_batch, t=self.num_timesteps)
 
         tagg_out    = self.timeAggregate(patch_out)
-        return tagg_out
+
+        return tagg_out, self.n_patches
 
 
+
+
+class ScOTDPOTTimeAggregate(Swinv2PreTrainedModel):
+    """Inspired by https://github.com/huggingface/transformers/blob/v4.35.2/src/transformers/models/swinv2/modeling_swinv2.py#L1129"""
+
+    def __init__(self, config, use_mask_token=False):
+        super().__init__(config)
+
+        self.config = config
+        self.num_layers_encoder = len(config.depths)
+        self.num_layers_decoder = len(config.depths)
+        self.num_features = int(config.embed_dim * 2 ** (self.num_layers_encoder - 1))
+
+        # self.embeddings = ScOTEmbeddings(config, use_mask_token=use_mask_token)
+        ## TODO: Cleanup , take config as argument
+        self.embeddings = DPOTPatchTimeAggregate(   image_size      = config.image_size,
+                                                    patch_size      = config.patch_size,
+                                                    embed_dim       = config.embed_dim,
+                                                    in_channels     = config.num_channels,
+                                                    num_timesteps   = config.num_timesteps,
+                                                    activation      = config.hidden_act,
+                                                    time_agg_type   = config.time_agg_type,)
+
+
+        self.encoder = ScOTEncoder(config, self.embeddings.patch_grid)
+        self.decoder = ScOTDecoder(config, self.embeddings.patch_grid)
+        self.patch_recovery = ScOTPatchRecovery(config)
+
+        if config.residual_model == "convnext":
+            res_model = ConvNeXtBlock
+        elif config.residual_model == "resnet":
+            res_model = ResNetBlock
+        else:
+            raise ValueError("residual_model must be 'convnext' or 'resnet'")
+
+        self.residual_blocks = nn.ModuleList(
+            [
+                (
+                    nn.ModuleList(
+                        [
+                            res_model(config, config.embed_dim * 2**i)
+                            for _ in range(depth)
+                        ]
+                    )
+                    if depth > 0
+                    else nn.ModuleList([nn.Identity()])
+                )
+                for i, depth in enumerate(config.skip_connections)
+            ]
+        )
+
+        self.post_init()
+
+    ## TODO: Update DPOTPatchTimeAggregate to have .patch_embeddings
+    def get_input_embeddings(self):
+        return self.embeddings.patch_embeddings
+
+    def _prune_heads(self, heads_to_prune):
+        for layer, heads in heads_to_prune.items():
+            self.encoder.layers[layer].attention.prune_heads(heads)
+        for layer, heads in reversed(heads_to_prune.items()):
+            self.decoder.layers[layer].attention.prune_heads(heads)
+
+    def _downsample(self, image, target_size):
+        image_size = image.shape[-2]
+        freqs = torch.fft.fftfreq(image_size, d=1 / image_size)
+        sel = torch.logical_and(freqs >= -target_size / 2, freqs <= target_size / 2 - 1)
+        image_hat = torch.fft.fft2(image, norm="forward")
+        image_hat = image_hat[:, :, sel, :][:, :, :, sel]
+        image = torch.fft.ifft2(image_hat, norm="forward").real
+        return image
+
+    def _upsample(self, image, target_size):
+        # https://stackoverflow.com/questions/71143279/upsampling-images-in-frequency-domain-using-pytorch
+        image_size = image.shape[-2]
+        image_hat = torch.fft.fft2(image, norm="forward")
+        image_hat = torch.fft.fftshift(image_hat)
+        pad_size = (target_size - image_size) // 2
+        real = nn.functional.pad(
+            image_hat.real, (pad_size, pad_size, pad_size, pad_size), value=0.0
+        )
+        imag = nn.functional.pad(
+            image_hat.imag, (pad_size, pad_size, pad_size, pad_size), value=0.0
+        )
+        image_hat = torch.fft.ifftshift(torch.complex(real, imag))
+        image = torch.fft.ifft2(image_hat, norm="forward").real
+        return image
+
+    def forward(
+        self,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        time: Optional[torch.FloatTensor] = None,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        pixel_mask: Optional[torch.BoolTensor] = None,
+        labels: Optional[torch.FloatTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, ScOTOutput]:
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+
+        if pixel_values is None:
+            raise ValueError("pixel_values cannot be None")
+
+        head_mask = self.get_head_mask(
+            head_mask, self.num_layers_encoder + self.num_layers_decoder
+        )
+
+        if isinstance(head_mask, list):
+            head_mask_encoder = head_mask[: self.num_layers_encoder]
+            head_mask_decoder = head_mask[self.num_layers_encoder :]
+        else:
+            head_mask_encoder, head_mask_decoder = head_mask.split(
+                [self.num_layers_encoder, self.num_layers_decoder]
+            )
+
+        image_size = pixel_values.shape[2]
+        # image must be square
+        if image_size != self.config.image_size:
+            if image_size < self.config.image_size:
+                pixel_values = self._upsample(pixel_values, self.config.image_size)
+            else:
+                pixel_values = self._downsample(pixel_values, self.config.image_size)
+
+
+        # TODO: update DPOTPatchTimeAggregate to work with other arguments in 
+        # commented out lines below
+        # embedding_output, input_dimensions = self.embeddings(
+        #     pixel_values, bool_masked_pos=bool_masked_pos, time=time
+        # )
+
+        embedding_output, input_dimensions = self.embeddings(
+            pixel_values,
+        )
+
+        encoder_outputs = self.encoder(
+            embedding_output,
+            input_dimensions,
+            time,
+            head_mask=head_mask_encoder,
+            output_attentions=output_attentions,
+            output_hidden_states=True,
+            output_hidden_states_before_downsampling=True,
+            return_dict=return_dict,
+        )
+
+        if return_dict:
+            skip_states = list(encoder_outputs.hidden_states[1:])
+        else:
+            skip_states = list(encoder_outputs[1][1:])
+
+        for i in range(len(skip_states)):
+            for block in self.residual_blocks[i]:
+                if isinstance(block, nn.Identity):
+                    skip_states[i] = block(skip_states[i])
+                else:
+                    skip_states[i] = block(skip_states[i], time)
+
+        #! assumes square images
+        input_dim = math.floor(skip_states[-1].shape[1] ** 0.5)
+        decoder_output = self.decoder(
+            skip_states[-1],
+            (input_dim, input_dim),
+            time=time,
+            skip_states=skip_states[:-1],
+            head_mask=head_mask_decoder,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output = decoder_output[0]
+        prediction = self.patch_recovery(sequence_output)
+        # The following can be used for learning just the residual for time-dependent problems
+        if self.config.learn_residual:
+            if self.config.num_channels > self.config.num_out_channels:
+                pixel_values = pixel_values[:, 0 : self.config.num_out_channels]
+            prediction += pixel_values
+
+        if image_size != self.config.image_size:
+            if image_size > self.config.image_size:
+                prediction = self._upsample(prediction, image_size)
+            else:
+                prediction = self._downsample(prediction, image_size)
+
+        if pixel_mask is not None:
+            prediction[pixel_mask] = labels[pixel_mask].type_as(prediction)
+        loss = None
+        if labels is not None:
+            if self.config.p == 1:
+                loss_fn = nn.functional.l1_loss
+            elif self.config.p == 2:
+                loss_fn = nn.functional.mse_loss
+            else:
+                raise ValueError("p must be 1 or 2")
+            if self.config.channel_slice_list_normalized_loss is not None:
+                loss = torch.mean(
+                    torch.stack(
+                        [
+                            loss_fn(
+                                prediction[
+                                    :,
+                                    self.config.channel_slice_list_normalized_loss[
+                                        i
+                                    ] : self.config.channel_slice_list_normalized_loss[
+                                        i + 1
+                                    ],
+                                ],
+                                labels[
+                                    :,
+                                    self.config.channel_slice_list_normalized_loss[
+                                        i
+                                    ] : self.config.channel_slice_list_normalized_loss[
+                                        i + 1
+                                    ],
+                                ],
+                            )
+                            / (
+                                loss_fn(
+                                    labels[
+                                        :,
+                                        self.config.channel_slice_list_normalized_loss[
+                                            i
+                                        ] : self.config.channel_slice_list_normalized_loss[
+                                            i + 1
+                                        ],
+                                    ],
+                                    torch.zeros_like(
+                                        labels[
+                                            :,
+                                            self.config.channel_slice_list_normalized_loss[
+                                                i
+                                            ] : self.config.channel_slice_list_normalized_loss[
+                                                i + 1
+                                            ],
+                                        ]
+                                    ),
+                                )
+                                + 1e-10
+                            )
+                            for i in range(
+                                len(self.config.channel_slice_list_normalized_loss) - 1
+                            )
+                        ]
+                    )
+                )
+            else:
+                loss = loss_fn(prediction, labels)
+
+        if not return_dict:
+            output = (prediction,) + decoder_output[1:] + encoder_outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return ScOTOutput(
+            loss=loss,
+            output=prediction,
+            hidden_states=(
+                decoder_output.hidden_states + encoder_outputs.hidden_states
+                if output_hidden_states is not None and output_hidden_states is True
+                else None
+            ),
+            attentions=(
+                decoder_output.attentions + encoder_outputs.attentions
+                if output_attentions is not None and output_attentions is True
+                else None
+            ),
+            reshaped_hidden_states=(
+                decoder_output.reshaped_hidden_states
+                + encoder_outputs.reshaped_hidden_states
+                if output_hidden_states is not None and output_hidden_states is True
+                else None
+            ),
+        )
