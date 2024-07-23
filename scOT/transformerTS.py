@@ -9,7 +9,6 @@ from scOT.layers.normalization import ConditionalLayerNorm
 class TransformerTS(nn.Module):
     def __init__(self, configs, embed_dim, drop_path=0.0, layer_scale_init_value=1e-6):
         super().__init__()
-        print("TODO, add time dependence in transformerTS to layer norm")
         #self.output_attention = configs.output_attention
         self.output_attention = False
 
@@ -31,9 +30,9 @@ class TransformerTS(nn.Module):
         )
     
     def forward(self, x, time):
-        print("INPUT ATTN", x.shape)
+        #print("INPUT ATTN", x.shape)
         enc_out, attns = self.encoder(x, time, attn_mask=None)
-        print("OUTPUT ATTN", enc_out.shape)
+        #print("OUTPUT ATTN", enc_out.shape)
         return enc_out
 
 

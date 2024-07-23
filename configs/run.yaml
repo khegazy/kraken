@@ -1,5 +1,7 @@
 dataset:
   value: "fluids.compressible.Gaussians"
+input_time_len:
+  value: 4
 num_trajectories:
   value: 128
 model_name:
@@ -23,6 +25,6 @@ early_stopping_patience:
 num_epochs:
   value: 200
 batch_size:
-  value: 9
+  value: 16
 max_grad_norm:
   value: 5.0

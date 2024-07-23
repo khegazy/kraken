@@ -17,7 +17,7 @@ class ConditionalLayerNorm(nn.Module):
         self.bias = nn.Linear(1, dim)
 
     def forward(self, x, time):
-        print("conditional layer norm!!!!!!", x.shape, time.shape)
+        #print("conditional layer norm!!!!!!", x.shape, time.shape)
         mean = x.mean(dim=-1, keepdim=True)
         var = (x**2).mean(dim=-1, keepdim=True) - mean**2
         x = (x - mean) / (var + self.eps).sqrt()
@@ -30,12 +30,12 @@ class ConditionalLayerNorm(nn.Module):
         if x.dim() == 5:
             weight = weight.unsqueeze(-2)
             bias = bias.unsqueeze(-2)
-        print(x.shape, weight.shape, bias.shape, time.shape)
+        #print(x.shape, weight.shape, bias.shape, time.shape)
         return weight * x + bias
         #conditional layer norm!!!!!! torch.Size([9, 8, 1024, 96]) torch.Size([9, 8])
 
     def __forward(self, x, time):
-        print("conditional layer norm!!!!!!", x.shape, time.shape)
+        #print("conditional layer norm!!!!!!", x.shape, time.shape)
         mean = x.mean(dim=-1, keepdim=True)
         var = (x**2).mean(dim=-1, keepdim=True) - mean**2
         x = (x - mean) / (var + self.eps).sqrt()
@@ -45,5 +45,5 @@ class ConditionalLayerNorm(nn.Module):
         if x.dim() == 5:
             weight = weight.unsqueeze(-2)
             bias = bias.unsqueeze(-2)
-        print(x.shape, weight.shape, bias.shape, time.shape)
+        #print(x.shape, weight.shape, bias.shape, time.shape)
         return weight * x + bias

@@ -165,9 +165,7 @@ class FullAttention(nn.Module):
         _, S, _, D = values.shape
         scale = self.scale or 1. / sqrt(E)
 
-        print("WTF", queries.shape, keys.shape) 
         scores = torch.einsum("blhe,bshe->bhls", queries, keys)
-        print("CHECK IF RIGHT SIZE", scores.shape)
 
         if self.mask_flag:
             if attn_mask is None:
@@ -302,7 +300,6 @@ class AttentionLayer(nn.Module):
         self.n_heads = n_heads
 
     def forward(self, queries, keys, values, attn_mask, tau=None, delta=None):
-        print("ATTENTINO SHAPE, CHECK IF RIGHT ORDER", queries.shape, keys.shape, values.shape)
         B, L, _ = queries.shape
         _, S, _ = keys.shape
         H = self.n_heads
@@ -310,7 +307,6 @@ class AttentionLayer(nn.Module):
         queries = self.query_projection(queries).view(B, L, H, -1)
         keys = self.key_projection(keys).view(B, S, H, -1)
         values = self.value_projection(values).view(B, S, H, -1)
-        print("AFTER KQV", queries.shape, keys.shape, values.shape)
 
         out, attn = self.inner_attention(
             queries,

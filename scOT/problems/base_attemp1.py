@@ -158,6 +158,7 @@ def get_dataset(dataset, **kwargs):
     else:
         raise ValueError(f"Unknown dataset {dataset}")
 
+    print("DATASET", kwargs)
     return dset(**kwargs) if ".time" not in dataset else TimeWrapper(dset(**kwargs))
 
 
@@ -298,13 +299,14 @@ class BaseTimeDataset(BaseDataset, ABC):
         assert fix_input_to_time_step is None or fix_input_to_time_step >= 0
 
         super().__init__(*args, **kwargs)
-        self.max_num_time_steps = max_num_time_steps
+        self.max_num_time_steps = max_num_time_steps - input_time_len
         self.time_step_size = time_step_size
         self.fix_input_to_time_step = fix_input_to_time_step
         self.allowed_time_transitions = allowed_time_transitions
         self.input_time_len = input_time_len
 
     def _idx_map(self, idx):
+        print("IN IDX MAP")
         i = idx // self.multiplier
         _idx = idx - i * self.multiplier
 
@@ -339,6 +341,7 @@ class BaseTimeDataset(BaseDataset, ABC):
         assert self.N_test is not None and self.N_test > 0
         assert self.max_num_time_steps is not None and self.max_num_time_steps > 0
 
+        print("WHAT ARE THESE NUMBERS", self.num_trajectories, self.max_num_time_steps)
         if self.fix_input_to_time_step is not None:
             self.multiplier = self.max_num_time_steps
         else:
@@ -351,9 +354,7 @@ class BaseTimeDataset(BaseDataset, ABC):
                     ):
                         continue
                     self.time_indices.append(
-                        (
-                            self.input_time_len + self.time_step_size * i,
-                            self.input_time_len + self.time_step_size * j)
+                        (self.time_step_size * i, self.time_step_size * j)
                     )
             self.multiplier = len(self.time_indices)
 

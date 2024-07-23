@@ -61,7 +61,7 @@ class Encoder(nn.Module):
 
     def forward(self, x, time, attn_mask=None, tau=None, delta=None):
         # x [B, L, D]
-        print("IN ATTN ENCODER CHECK IF MAKES SENSE", x.shape)
+        #print("IN ATTN ENCODER CHECK IF MAKES SENSE", x.shape, time.shape)
         B, T, P, E = x.shape
         x = einops.rearrange(x, 'b t p e -> (b p) t e')
         attns = []
@@ -84,7 +84,6 @@ class Encoder(nn.Module):
             )
             time = einops.rearrange(time, 'b p t ->(b p) t')
             x = self.norm(x, time)
-        print("^CHECK THAT NORM IS OVER RIGHT DIM")
         x = einops.rearrange(x, '(b p) t e -> b t p e', b=B)
         return x, attns
 

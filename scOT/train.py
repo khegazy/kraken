@@ -130,11 +130,15 @@ def setup(params, model_map=True):
     else:
         config = params.config
 
+    print("IN SETUP")
     if RANK == 0 or RANK == -1:
         run = wandb.init(
             project=params.wandb_project_name, name=params.wandb_run_name, config=config
         )
         config = wandb.config
+        print("WANDB INFO", params.wandb_project_name, params.wandb_run_name)
+        print(config)
+        print("WANDB RUN", run)
     else:
 
         def clean_yaml(config):
@@ -207,6 +211,7 @@ if __name__ == "__main__":
         if ("incompressible" in config["dataset"]) and params.just_velocities
         else {}
     )
+    train_eval_set_kwargs['input_time_len'] = config["input_time_len"]
     if params.move_data is not None:
         train_eval_set_kwargs["move_to_local_scratch"] = params.move_data
     if params.max_num_train_time_steps is not None:
@@ -276,6 +281,7 @@ if __name__ == "__main__":
             residual_model=config["residual_model"],
             use_conditioning=time_involved,
             learn_residual=False,
+            input_time_len=config["input_time_len"]
         )
         if params.finetune_from is None or params.replace_embedding_recovery
         else None

@@ -332,18 +332,14 @@ class ScOTEmbeddings(nn.Module):
         time: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.Tensor]:
         has_time_dependence = False
-        print("IN CONV", pixel_values.shape, len(pixel_values.shape) == 5)
         if len(pixel_values.shape) == 5:
             B, T, C, H, W = pixel_values.shape
             pixel_values = torch.reshape(pixel_values, (B*T, C, H, W))
             has_time_dependence = True
-            print("IN CONV reshape", pixel_values.shape)
         embeddings, output_dimensions = self.patch_embeddings(pixel_values)
         if has_time_dependence:
-            print("b4", embeddings.shape, output_dimensions)
             P, E = embeddings.shape[-2:]
             embeddings = torch.reshape(embeddings, (B, T, P, E))
-            print("after", embeddings.shape)
         else:
             B, P, E = embeddings.size()
 
@@ -481,13 +477,13 @@ class ScOTLayer(nn.Module):
             self.set_shift_and_window_size(input_dimensions)
         else:
             pass
-        print("IN SCOT LAYER", hidden_states.shape)
+        #print("IN SCOT LAYER", hidden_states.shape)
         height, width = input_dimensions
         batch_size, _, channels = hidden_states.size()
         shortcut = hidden_states
 
         # pad hidden_states to multiples of window size
-        print("\tIN SCOT LAYER", hidden_states.shape, height, width, batch_size)
+        #print("\tIN SCOT LAYER", hidden_states.shape, height, width, batch_size)
         hidden_states = hidden_states.view(batch_size, height, width, channels)
         hidden_states, pad_values = self.maybe_pad(hidden_states, height, width)
         _, height_pad, width_pad, _ = hidden_states.shape
@@ -1091,7 +1087,6 @@ class ScOTEncoder(nn.Module):
             if all_self_attentions is not None:
                 raise NotImplementedError("Need to reshape")
         
-        print("TODO: Still need to merge time domain")
         return Swinv2EncoderOutput(
             last_hidden_state=hidden_states,
             hidden_states=all_hidden_states,
@@ -1245,11 +1240,9 @@ class ScOTDecoder(nn.Module):
 
         for i, layer_module in enumerate(self.layers):
             layer_head_mask = head_mask[i] if head_mask is not None else None
-            print("ASK MAX WHAT THIS IS ^")
 
             if i != 0 and skip_states[len(skip_states) - i] is not None:
                 # residual connection
-                print("right size???", hidden_states.shape)
                 #Q = self.Q_layers[i](skip_states[len(skip_states) - i])
                 #K = self.K_layers[i](hidden_states)
                 #V = self.V_layers[i](hidden_states)
@@ -1261,14 +1254,14 @@ class ScOTDecoder(nn.Module):
                 attn_hidden_states, attn_weights = self.X_attn[i](
                     hidden_states, skip_state, skip_state, None
                 )
-                print("attn weights", attn_weights.shape)
-                print("X ATTN OUTPUT", attn_hidden_states.shape) 
-                print("WTF", time.shape, attn_weights.squeeze(-2).shape)
+                #print("attn weights", attn_weights.shape)
+                #print("X ATTN OUTPUT", attn_hidden_states.shape) 
+                #print("WTF", time.shape, attn_weights.squeeze(-2).shape)
                 attn_weights = einops.rearrange(attn_weights.squeeze(-2), '(b p) h t -> b p h t', b=B)
                 merged_time = torch.einsum('b t, b p h t -> b p h', time, attn_weights)
                 merged_time = torch.mean(merged_time, dim=-1)
                 #merged_time = einops.rearrange(merged_time, '(b p) -> b p', b=B)
-                print("merged times", merged_time.shape)
+                #print("merged times", merged_time.shape)
 
                 attn_hidden_states = attn_hidden_states.squeeze(1)
                 attn_hidden_states = einops.rearrange(attn_hidden_states, '(b p) e -> b p e', b=B)
@@ -1278,10 +1271,10 @@ class ScOTDecoder(nn.Module):
 
                 hidden_states = einops.rearrange(hidden_states.squeeze(-2), '(b p) e -> b p e', b=B)
                 hidden_states = self.X_attn_layer_norm[i](hidden_states, merged_time)
-                print("X ATTN OUTPUT", attn_hidden_states.shape, hidden_states.shape) 
+                #print("X ATTN OUTPUT", attn_hidden_states.shape, hidden_states.shape) 
                 #hidden_states = hidden_states + skip_states[len(skip_states) - i]
                 hidden_states = hidden_states + attn_hidden_states
-                print("MERGED WITH X ATTN", hidden_states.shape, attn_hidden_states.shape, merged_time.shape)
+                #print("MERGED WITH X ATTN", hidden_states.shape, attn_hidden_states.shape, merged_time.shape)
             elif i == 0:
                 hidden_states = torch.einsum('btpe,t->bpe', hidden_states, self.merge_time)
                 merged_time = torch.einsum('bt,t->b', time, self.merge_time)
@@ -1441,13 +1434,20 @@ class ScOT(Swinv2PreTrainedModel):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, ScOTOutput]:
         
-        print("INPUT INTO MODEL", pixel_values.shape, time.shape)
-        B, C, H, W = pixel_values.shape
+        #print("INPUT INTO MODEL", pixel_values.shape, time.shape)
+        B, T, C, H, W = pixel_values.shape
+        """
+        for i in range(4):
+            print("printing ", i, '\n\n')
+            print(pixel_values[:,:,i],'\n\n\n\n')
+        """
+        """
         pixel_values = torch.tile(pixel_values, (1,self.config.input_time_len,1,1))
         pixel_values = torch.reshape(pixel_values, (B, self.config.input_time_len, C, H, W))
         time = torch.tile(time.unsqueeze(-1), (1,self.config.input_time_len))
         time = time - 0.1*torch.arange(self.config.input_time_len).to(time.device)
         print("INPUT INTO MODEL AFTER", pixel_values.shape)
+        """
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
@@ -1501,7 +1501,7 @@ class ScOT(Swinv2PreTrainedModel):
             return_dict=return_dict,
         )
 
-        print("ENCODER OUTPUTS", len(encoder_outputs.hidden_states), encoder_outputs.hidden_states[0].shape)
+        #print("ENCODER OUTPUTS", len(encoder_outputs.hidden_states), encoder_outputs.hidden_states[0].shape)
         if return_dict:
             skip_states = list(encoder_outputs.hidden_states[1:])
         else:
@@ -1527,7 +1527,7 @@ class ScOT(Swinv2PreTrainedModel):
             return_dict=return_dict,
         )
 
-        print("DECODER OUTPUT!!!!!!!", decoder_output[0].shape)
+        #print("DECODER OUTPUT!!!!!!!", decoder_output[0].shape)
         sequence_output = decoder_output[0]
         prediction = self.patch_recovery(sequence_output)
 
