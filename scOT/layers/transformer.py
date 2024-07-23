@@ -1,4 +1,5 @@
 import einops
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -58,7 +59,7 @@ class Encoder(nn.Module):
         self.conv_layers = nn.ModuleList(conv_layers) if conv_layers is not None else None
         self.norm = norm_layer
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, time, attn_mask=None, tau=None, delta=None):
         # x [B, L, D]
         print("IN ATTN ENCODER CHECK IF MAKES SENSE", x.shape)
         B, T, P, E = x.shape
@@ -78,7 +79,11 @@ class Encoder(nn.Module):
                 attns.append(attn)
 
         if self.norm is not None:
-            x = self.norm(x)
+            time = torch.tile(
+                time.unsqueeze(1), (1, x.shape[0]//time.shape[0], 1)
+            )
+            time = einops.rearrange(time, 'b p t ->(b p) t')
+            x = self.norm(x, time)
         print("^CHECK THAT NORM IS OVER RIGHT DIM")
         x = einops.rearrange(x, '(b p) t e -> b t p e', b=B)
         return x, attns

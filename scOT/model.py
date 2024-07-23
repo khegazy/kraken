@@ -54,6 +54,7 @@ import einops
 import math
 import collections
 
+from scOT.layers.normalization import LayerNorm, ConditionalLayerNorm
 from transformerTS import TransformerTS
 from scOT.layers.self_attention import AttentionLayer, FullAttention
 
@@ -79,6 +80,7 @@ class ScOTConfig(PretrainedConfig):
 
     def __init__(
         self,
+        input_time_len=8,
         image_size=224,
         patch_size=4,
         num_channels=3,
@@ -108,6 +110,7 @@ class ScOTConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
+        self.input_time_len = input_time_len
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_channels = num_channels
@@ -139,53 +142,6 @@ class ScOTConfig(PretrainedConfig):
         self.num_residual_layers = num_residual_layers
         self.num_res_attn_heads = num_res_attn_heads
 
-
-class LayerNorm(nn.LayerNorm):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x, time):
-        return super().forward(x)
-
-
-class ConditionalLayerNorm(nn.Module):
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Linear(1, dim)
-        self.bias = nn.Linear(1, dim)
-
-    def forward(self, x, time):
-        print("conditional layer norm!!!!!!", x.shape, time.shape)
-        mean = x.mean(dim=-1, keepdim=True)
-        var = (x**2).mean(dim=-1, keepdim=True) - mean**2
-        x = (x - mean) / (var + self.eps).sqrt()
-        time = time.unsqueeze(-1).type_as(x)
-        weight = self.weight(time)
-        bias = self.bias(time)
-        if not (x.dim() == 3 and time.dim() == 3):
-            weight = weight.unsqueeze(-2)
-            bias = bias.unsqueeze(-2)
-        if x.dim() == 5:
-            weight = weight.unsqueeze(-2)
-            bias = bias.unsqueeze(-2)
-        print(x.shape, weight.shape, bias.shape, time.shape)
-        return weight * x + bias
-        #conditional layer norm!!!!!! torch.Size([9, 8, 1024, 96]) torch.Size([9, 8])
-
-    def __forward(self, x, time):
-        print("conditional layer norm!!!!!!", x.shape, time.shape)
-        mean = x.mean(dim=-1, keepdim=True)
-        var = (x**2).mean(dim=-1, keepdim=True) - mean**2
-        x = (x - mean) / (var + self.eps).sqrt()
-        time = time.unsqueeze(-1).type_as(x)
-        weight = weight.unsqueeze(-2).type_as(x)
-        bias = bias.unsqueeze(-2).type_as(x)
-        if x.dim() == 5:
-            weight = weight.unsqueeze(-2)
-            bias = bias.unsqueeze(-2)
-        print(x.shape, weight.shape, bias.shape, time.shape)
-        return weight * x + bias
  
 class ConvNeXtBlock(nn.Module):
     r"""Taken from: https://github.com/facebookresearch/ConvNeXt/blob/main/models/convnext.py
@@ -1186,6 +1142,11 @@ class ScOTDecoder(nn.Module):
         )
 
         if config.residual_model.lower() == 'transformer':
+            self.merge_time = nn.Parameter(
+                torch.ones(config.input_time_len, dtype=torch.float)\
+                    /config.input_time_len,
+                requires_grad=True
+            )
             """
             self.Q_layers = nn.ModuleList(
                 [
@@ -1242,6 +1203,13 @@ class ScOTDecoder(nn.Module):
                         int(config.embed_dim * 2**i_layer),
                         int(config.embed_dim * 2**i_layer)
                     ) for i_layer in reversed(range(self.num_layers))
+                ]
+            )
+
+            self.X_attn_layer_norm = nn.ModuleList(
+                [
+                    ConditionalLayerNorm(int(config.embed_dim * 2**i_layer))\
+                        for i_layer in reversed(range(self.num_layers))
                 ]
             )
 
@@ -1309,12 +1277,14 @@ class ScOTDecoder(nn.Module):
                 #attn_hidden_states = layernorm
 
                 hidden_states = einops.rearrange(hidden_states.squeeze(-2), '(b p) e -> b p e', b=B)
+                hidden_states = self.X_attn_layer_norm[i](hidden_states, merged_time)
                 print("X ATTN OUTPUT", attn_hidden_states.shape, hidden_states.shape) 
                 #hidden_states = hidden_states + skip_states[len(skip_states) - i]
                 hidden_states = hidden_states + attn_hidden_states
                 print("MERGED WITH X ATTN", hidden_states.shape, attn_hidden_states.shape, merged_time.shape)
             elif i == 0:
-                merged_time = torch.mean(time, dim=-1)
+                hidden_states = torch.einsum('btpe,t->bpe', hidden_states, self.merge_time)
+                merged_time = torch.einsum('bt,t->b', time, self.merge_time)
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -1473,10 +1443,10 @@ class ScOT(Swinv2PreTrainedModel):
         
         print("INPUT INTO MODEL", pixel_values.shape, time.shape)
         B, C, H, W = pixel_values.shape
-        pixel_values = torch.tile(pixel_values, (1,8,1,1))
-        pixel_values = torch.reshape(pixel_values, (B, 8, C, H, W))
-        time = torch.tile(time.unsqueeze(-1), (1,8))
-        time = time - 0.1*torch.arange(8).to(time.device)
+        pixel_values = torch.tile(pixel_values, (1,self.config.input_time_len,1,1))
+        pixel_values = torch.reshape(pixel_values, (B, self.config.input_time_len, C, H, W))
+        time = torch.tile(time.unsqueeze(-1), (1,self.config.input_time_len))
+        time = time - 0.1*torch.arange(self.config.input_time_len).to(time.device)
         print("INPUT INTO MODEL AFTER", pixel_values.shape)
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
@@ -1547,7 +1517,7 @@ class ScOT(Swinv2PreTrainedModel):
         #! assumes square images
         input_dim = math.floor(skip_states[-1].shape[2] ** 0.5)
         decoder_output = self.decoder(
-            torch.mean(skip_states[-1], dim=1),
+            skip_states[-1],
             (input_dim, input_dim),
             time=time,
             skip_states=skip_states[:-1],
@@ -1573,8 +1543,6 @@ class ScOT(Swinv2PreTrainedModel):
             else:
                 prediction = self._downsample(prediction, image_size)
 
-        print(prediction.shape, pixel_mask.shape, labels.shape, self.config.image_size, image_size)
-        print("WTF PM", pixel_mask)
         if pixel_mask is not None:
             prediction[pixel_mask] = labels[pixel_mask].type_as(prediction)
         loss = None
