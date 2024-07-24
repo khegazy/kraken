@@ -172,15 +172,18 @@ class KolmogorovFlow(BaseTimeDataset):
             self.constants["mean"] = self.constants["mean"][1:3]
             self.constants["std"] = self.constants["std"][1:3]
 
-        self.density = torch.ones(1, self.resolution, self.resolution)
-        self.pressure = torch.zeros(1, self.resolution, self.resolution)
+        self.density = torch.ones(1, 1, self.resolution, self.resolution)
+        self.density = torch.tile(self.density, (self.input_time_len, 1 ,1 ,1))
+        self.pressure = torch.zeros(1, 1, self.resolution, self.resolution)
+        self.pressure = torch.tile(self.pressure, (self.input_time_len, 1 ,1 ,1))
         X, Y = torch.meshgrid(
             torch.linspace(0, 1, self.resolution),
             torch.linspace(0, 1, self.resolution),
             indexing="ij",
         )
         f = lambda x, y: 0.1 * torch.sin(2.0 * np.pi * (x + y))
-        self.forcing = f(X, Y).unsqueeze(0)
+        self.forcing = f(X, Y).unsqueeze(0).unsqueeze(0)
+        self.forcing = torch.tile(self.forcing, (self.input_time_len, 1, 1, 1))
         self.constants["mean_forcing"] = -1.2996679288335145e-09
         self.constants["std_forcing"] = 0.0707106739282608
         self.forcing = (self.forcing - self.constants["mean_forcing"]) / self.constants[
@@ -209,12 +212,13 @@ class KolmogorovFlow(BaseTimeDataset):
 
     def __getitem__(self, idx):
         i, t, t1, t2 = self._idx_map(idx)
+        t = t + ((self.input_time_len - 1) - torch.arange(self.input_time_len))
         time = t / self.constants["time"]
 
         inputs_v = (
-            torch.from_numpy(self.reader["solution"][i + self.start, t1, 0:2])
+            torch.from_numpy(self.reader["solution"][i + self.start, t1-self.input_time_len:t1, 0:2])
             .type(torch.float32)
-            .reshape(2, self.resolution, self.resolution)
+            .reshape(self.input_time_len, 2, self.resolution, self.resolution)
         )
         label_v = (
             torch.from_numpy(self.reader["solution"][i + self.start, t2, 0:2])
@@ -223,8 +227,8 @@ class KolmogorovFlow(BaseTimeDataset):
         )
 
         if not self.just_velocities:
-            inputs = torch.cat([self.density, inputs_v, self.pressure], dim=0)
-            label = torch.cat([self.density, label_v, self.pressure], dim=0)
+            inputs = torch.cat([self.density, inputs_v, self.pressure], dim=1)
+            label = torch.cat([self.density[0], label_v, self.pressure[0]], dim=0)
         else:
             inputs = inputs_v
             label = label_v
@@ -232,8 +236,8 @@ class KolmogorovFlow(BaseTimeDataset):
         inputs = (inputs - self.constants["mean"]) / self.constants["std"]
         label = (label - self.constants["mean"]) / self.constants["std"]
 
-        inputs = torch.cat([inputs, self.forcing], dim=0)
-        label = torch.cat([label, self.forcing], dim=0)
+        inputs = torch.cat([inputs, self.forcing], dim=1)
+        label = torch.cat([label, self.forcing[0]], dim=0)
 
         return {
             "pixel_values": inputs,
