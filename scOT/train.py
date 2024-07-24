@@ -130,11 +130,15 @@ def setup(params, model_map=True):
     else:
         config = params.config
 
+    print("IN SETUP")
     if RANK == 0 or RANK == -1:
         run = wandb.init(
             project=params.wandb_project_name, name=params.wandb_run_name, config=config
         )
         config = wandb.config
+        print("WANDB INFO", params.wandb_project_name, params.wandb_run_name)
+        print(config)
+        print("WANDB RUN", run)
     else:
 
         def clean_yaml(config):
@@ -192,6 +196,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Set this if you have to replace the embeddings and recovery layers because you are not just using the density, velocity and pressure channels. Only relevant for finetuning.",
     )
+    parser.add_argument(
+        "--residual_model",
+        type=str,
+        default="convnext",
+        help="Residual model",
+    )
+
     params = read_cli(parser).parse_args()
     run, config, ckpt_dir, RANK, CPU_CORES = setup(params)
 
@@ -200,6 +211,7 @@ if __name__ == "__main__":
         if ("incompressible" in config["dataset"]) and params.just_velocities
         else {}
     )
+    train_eval_set_kwargs['input_time_len'] = config["input_time_len"]
     if params.move_data is not None:
         train_eval_set_kwargs["move_to_local_scratch"] = params.move_data
     if params.max_num_train_time_steps is not None:
@@ -266,9 +278,10 @@ if __name__ == "__main__":
             layer_norm_eps=1e-5,
             p=1,
             channel_slice_list_normalized_loss=channel_slice_list,
-            residual_model="convnext",
+            residual_model=config["residual_model"],
             use_conditioning=time_involved,
             learn_residual=False,
+            input_time_len=config["input_time_len"]
         )
         if params.finetune_from is None or params.replace_embedding_recovery
         else None

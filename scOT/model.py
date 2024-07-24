@@ -50,8 +50,13 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from typing import Optional, Union, Tuple, List
+import einops
 import math
 import collections
+
+from scOT.layers.normalization import LayerNorm, ConditionalLayerNorm
+from transformerTS import TransformerTS
+from scOT.layers.self_attention import AttentionLayer, FullAttention
 
 @dataclass
 class ScOTOutput(ModelOutput):
@@ -60,21 +65,6 @@ class ScOTOutput(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     reshaped_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-
-
-def get_activation(target_activ):
-    activ_all = {   'swish'     : torch.nn.SiLU(),
-                    'elu'       : torch.nn.ELU(),
-                    'linear'    : torch.nn.Identity(),
-                    'relu'      : torch.nn.ReLU(),
-                    'sigmoid'   : torch.nn.Sigmoid(),
-                    'tanh'      : torch.nn.Tanh(),
-                    'softmin'   : torch.nn.Softmin(),
-                    'softmax'   : torch.nn.Softmax(),
-                    'gelu'      : torch.nn.GELU(),
-                }
-    assert (target_activ in activ_all.keys()), '{}: unsupported activation specified'.format(target_activ)
-    return activ_all[target_activ]
 
 
 class ScOTConfig(PretrainedConfig):
@@ -89,6 +79,7 @@ class ScOTConfig(PretrainedConfig):
 
     def __init__(
         self,
+        input_time_len=8,
         image_size=224,
         patch_size=4,
         num_channels=3,
@@ -110,12 +101,15 @@ class ScOTConfig(PretrainedConfig):
         p=1,  # for loss: 1 for l1, 2 for l2
         channel_slice_list_normalized_loss=None,  # if None will fall back to absolute loss otherwise normalized loss with split channels
         residual_model="convnext",  # "convnext" or "resnet"
+        num_residual_layers=2,
+        num_res_attn_heads=4,
         use_conditioning=False,
         learn_residual=False,  # learn the residual for time-dependent problems
         **kwargs,
     ):
         super().__init__(**kwargs)
 
+        self.input_time_len = input_time_len
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_channels = num_channels
@@ -144,36 +138,10 @@ class ScOTConfig(PretrainedConfig):
         self.p = p
         self.channel_slice_list_normalized_loss = channel_slice_list_normalized_loss
         self.residual_model = residual_model
+        self.num_residual_layers = num_residual_layers
+        self.num_res_attn_heads = num_res_attn_heads
 
-
-class LayerNorm(nn.LayerNorm):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x, time):
-        return super().forward(x)
-
-
-class ConditionalLayerNorm(nn.Module):
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Linear(1, dim)
-        self.bias = nn.Linear(1, dim)
-
-    def forward(self, x, time):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = (x**2).mean(dim=-1, keepdim=True) - mean**2
-        x = (x - mean) / (var + self.eps).sqrt()
-        time = time.reshape(-1, 1).type_as(x)
-        weight = self.weight(time).unsqueeze(1)
-        bias = self.bias(time).unsqueeze(1)
-        if x.dim() == 4:
-            weight = weight.unsqueeze(1)
-            bias = bias.unsqueeze(1)
-        return weight * x + bias
-
-
+ 
 class ConvNeXtBlock(nn.Module):
     r"""Taken from: https://github.com/facebookresearch/ConvNeXt/blob/main/models/convnext.py
     ConvNeXt Block. There are two equivalent implementations:
@@ -362,12 +330,22 @@ class ScOTEmbeddings(nn.Module):
         bool_masked_pos: Optional[torch.BoolTensor] = None,
         time: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.Tensor]:
+        has_time_dependence = False
+        if len(pixel_values.shape) == 5:
+            B, T, C, H, W = pixel_values.shape
+            pixel_values = torch.reshape(pixel_values, (B*T, C, H, W))
+            has_time_dependence = True
         embeddings, output_dimensions = self.patch_embeddings(pixel_values)
+        if has_time_dependence:
+            P, E = embeddings.shape[-2:]
+            embeddings = torch.reshape(embeddings, (B, T, P, E))
+        else:
+            B, P, E = embeddings.size()
+
         embeddings = self.norm(embeddings, time)
-        batch_size, seq_len, _ = embeddings.size()
 
         if bool_masked_pos is not None:
-            mask_tokens = self.mask_token.expand(batch_size, seq_len, -1)
+            mask_tokens = self.mask_token.expand(B, P, -1)
             # replace the masked visual tokens by mask_tokens
             mask = bool_masked_pos.unsqueeze(-1).type_as(mask_tokens)
             embeddings = embeddings * (1.0 - mask) + mask_tokens * mask
@@ -498,11 +476,13 @@ class ScOTLayer(nn.Module):
             self.set_shift_and_window_size(input_dimensions)
         else:
             pass
+        #print("IN SCOT LAYER", hidden_states.shape)
         height, width = input_dimensions
         batch_size, _, channels = hidden_states.size()
         shortcut = hidden_states
 
         # pad hidden_states to multiples of window size
+        #print("\tIN SCOT LAYER", hidden_states.shape, height, width, batch_size)
         hidden_states = hidden_states.view(batch_size, height, width, channels)
         hidden_states, pad_values = self.maybe_pad(hidden_states, height, width)
         _, height_pad, width_pad, _ = hidden_states.shape
@@ -928,6 +908,9 @@ class ScOTDecodeStage(nn.Module):
 
             hidden_states = layer_outputs[0]
 
+        # Make the time the mean of each patch time
+        if time.dim() == 2:
+            time = torch.mean(time, dim=1)
         hidden_states_before_upsampling = hidden_states
         if self.upsample is not None:
             height_upsampled, width_upsampled = self.upsampled_size
@@ -1011,8 +994,19 @@ class ScOTEncoder(nn.Module):
         all_reshaped_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
 
+        has_time_dependence = False
+        if len(hidden_states.shape) == 4:
+            batch_size, T, P, hidden_size = hidden_states.shape
+            hidden_states = einops.rearrange(hidden_states, 'b t p e -> (b t) p e')
+            hidden_states = torch.reshape(hidden_states, (batch_size*T, P, hidden_size))
+            time = torch.flatten(time)
+            batch_size = batch_size*T
+            has_time_dependence = True
+        else:
+            batch_size, P, hidden_size = hidden_states.shape
+
+
         if output_hidden_states:
-            batch_size, _, hidden_size = hidden_states.shape
             # rearrange b (h w) c -> b c h w
             reshaped_hidden_state = hidden_states.view(
                 batch_size, *input_dimensions, hidden_size
@@ -1081,6 +1075,17 @@ class ScOTEncoder(nn.Module):
                 if v is not None
             )
 
+        if has_time_dependence:
+            hidden_states = einops.rearrange(
+                hidden_states, '(b t) p e -> b t p e', t=T
+            )
+            all_hidden_states = tuple([
+                einops.rearrange(hs, '(b t) p e -> b t p e', t=T)\
+                    for hs in all_hidden_states
+            ])
+            if all_self_attentions is not None:
+                raise NotImplementedError("Need to reshape")
+        
         return Swinv2EncoderOutput(
             last_hidden_state=hidden_states,
             hidden_states=all_hidden_states,
@@ -1130,6 +1135,79 @@ class ScOTDecoder(nn.Module):
             ]
         )
 
+        if config.residual_model.lower() == 'transformer':
+            self.merge_time = nn.Parameter(
+                torch.ones(config.input_time_len, dtype=torch.float)\
+                    /config.input_time_len,
+                requires_grad=True
+            )
+            """
+            self.Q_layers = nn.ModuleList(
+                [
+                    nn.Linear(
+                        int(config.embed_dim * 2**i_layer),
+                        int(config.embed_dim * 2**i_layer)
+                    ) for i_layer in reversed(range(self.num_layers))
+                ]
+            )
+            self.K_layers = nn.ModuleList(
+                [
+                    nn.Linear(
+                        int(config.embed_dim * 2**i_layer),
+                        int(config.embed_dim * 2**i_layer)
+                    ) for i_layer in reversed(range(self.num_layers))
+                ]
+            )
+            self.V_layers = nn.ModuleList(
+                [
+                    nn.Linear(
+                        int(config.embed_dim * 2**i_layer),
+                        int(config.embed_dim * 2**i_layer)
+                    ) for i_layer in reversed(range(self.num_layers))
+                ]
+            )
+            """
+            self.X_attn = nn.ModuleList(
+                [
+                    AttentionLayer(
+                        FullAttention(
+                            mask_flag=False, attention_dropout=config.hidden_dropout_prob,
+                            output_attention=True
+                        ), 
+                        int(config.embed_dim * 2**i_layer),
+                        config.num_res_attn_heads
+                    ) for i_layer in reversed(range(self.num_layers)) 
+                ]
+            )
+            """
+            self.X_attn = nn.ModuleList(
+                [
+                    nn.MultiheadAttention(
+                        int(config.embed_dim * 2**i_layer),
+                        config.num_res_attn_heads,
+                        config.hidden_dropout_prob
+                    ) for i_layer in reversed(range(self.num_layers))
+                ]
+            )
+            """
+
+            self.X_attn_mixing_layers = nn.ModuleList(
+                [
+                    nn.Linear(
+                        int(config.embed_dim * 2**i_layer),
+                        int(config.embed_dim * 2**i_layer)
+                    ) for i_layer in reversed(range(self.num_layers))
+                ]
+            )
+
+            self.X_attn_layer_norm = nn.ModuleList(
+                [
+                    ConditionalLayerNorm(int(config.embed_dim * 2**i_layer))\
+                        for i_layer in reversed(range(self.num_layers))
+                ]
+            )
+
+
         self.gradient_checkpointing = False
 
     def forward(
@@ -1164,13 +1242,48 @@ class ScOTDecoder(nn.Module):
 
             if i != 0 and skip_states[len(skip_states) - i] is not None:
                 # residual connection
-                hidden_states = hidden_states + skip_states[len(skip_states) - i]
+                #Q = self.Q_layers[i](skip_states[len(skip_states) - i])
+                #K = self.K_layers[i](hidden_states)
+                #V = self.V_layers[i](hidden_states)
+
+                #x = torch.permute(skip_states[len(skip_states) - i], (0,2,1,3))
+                B = hidden_states.shape[0]
+                skip_state = einops.rearrange(skip_states[len(skip_states) - i], 'b t p e -> (b p) t e')
+                hidden_states = einops.rearrange(hidden_states, 'b p e -> (b p) e').unsqueeze(-2)
+                attn_hidden_states, attn_weights = self.X_attn[i](
+                    hidden_states, skip_state, skip_state, None
+                )
+                #print("attn weights", attn_weights.shape)
+                #print("X ATTN OUTPUT", attn_hidden_states.shape) 
+                #print("WTF", time.shape, attn_weights.squeeze(-2).shape)
+                attn_weights = einops.rearrange(attn_weights.squeeze(-2), '(b p) h t -> b p h t', b=B)
+                merged_time = torch.einsum('b t, b p h t -> b p h', time, attn_weights)
+                merged_time = torch.mean(merged_time, dim=-1)
+                #merged_time = einops.rearrange(merged_time, '(b p) -> b p', b=B)
+                #print("merged times", merged_time.shape)
+
+                attn_hidden_states = attn_hidden_states.squeeze(1)
+                attn_hidden_states = einops.rearrange(attn_hidden_states, '(b p) e -> b p e', b=B)
+
+                attn_hidden_states = self.X_attn_mixing_layers[i](attn_hidden_states)
+                #attn_hidden_states = layernorm
+
+                hidden_states = einops.rearrange(hidden_states.squeeze(-2), '(b p) e -> b p e', b=B)
+                hidden_states = self.X_attn_layer_norm[i](hidden_states, merged_time)
+                #print("X ATTN OUTPUT", attn_hidden_states.shape, hidden_states.shape) 
+                #hidden_states = hidden_states + skip_states[len(skip_states) - i]
+                hidden_states = hidden_states + attn_hidden_states
+                #print("MERGED WITH X ATTN", hidden_states.shape, attn_hidden_states.shape, merged_time.shape)
+            elif i == 0:
+                hidden_states = torch.einsum('btpe,t->bpe', hidden_states, self.merge_time)
+                merged_time = torch.einsum('bt,t->b', time, self.merge_time)
+
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
                     layer_module.__call__,
                     hidden_states,
                     input_dimensions,
-                    time,
+                    merged_time,
                     layer_head_mask,
                     output_attentions,
                 )
@@ -1178,7 +1291,7 @@ class ScOTDecoder(nn.Module):
                 layer_outputs = layer_module(
                     hidden_states,
                     input_dimensions,
-                    time,
+                    merged_time,
                     layer_head_mask,
                     output_attentions,
                     always_partition,
@@ -1250,6 +1363,8 @@ class ScOT(Swinv2PreTrainedModel):
             res_model = ConvNeXtBlock
         elif config.residual_model == "resnet":
             res_model = ResNetBlock
+        elif config.residual_model == "transformer":
+            res_model = TransformerTS
         else:
             raise ValueError("residual_model must be 'convnext' or 'resnet'")
 
@@ -1317,6 +1432,21 @@ class ScOT(Swinv2PreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, ScOTOutput]:
+        
+        #print("INPUT INTO MODEL", pixel_values.shape, time.shape)
+        B, T, C, H, W = pixel_values.shape
+        """
+        for i in range(4):
+            print("printing ", i, '\n\n')
+            print(pixel_values[:,:,i],'\n\n\n\n')
+        """
+        """
+        pixel_values = torch.tile(pixel_values, (1,self.config.input_time_len,1,1))
+        pixel_values = torch.reshape(pixel_values, (B, self.config.input_time_len, C, H, W))
+        time = torch.tile(time.unsqueeze(-1), (1,self.config.input_time_len))
+        time = time - 0.1*torch.arange(self.config.input_time_len).to(time.device)
+        print("INPUT INTO MODEL AFTER", pixel_values.shape)
+        """
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
@@ -1347,7 +1477,7 @@ class ScOT(Swinv2PreTrainedModel):
                 [self.num_layers_encoder, self.num_layers_decoder]
             )
 
-        image_size = pixel_values.shape[2]
+        image_size = pixel_values.shape[3]
         # image must be square
         if image_size != self.config.image_size:
             if image_size < self.config.image_size:
@@ -1370,6 +1500,7 @@ class ScOT(Swinv2PreTrainedModel):
             return_dict=return_dict,
         )
 
+        #print("ENCODER OUTPUTS", len(encoder_outputs.hidden_states), encoder_outputs.hidden_states[0].shape)
         if return_dict:
             skip_states = list(encoder_outputs.hidden_states[1:])
         else:
@@ -1383,7 +1514,7 @@ class ScOT(Swinv2PreTrainedModel):
                     skip_states[i] = block(skip_states[i], time)
 
         #! assumes square images
-        input_dim = math.floor(skip_states[-1].shape[1] ** 0.5)
+        input_dim = math.floor(skip_states[-1].shape[2] ** 0.5)
         decoder_output = self.decoder(
             skip_states[-1],
             (input_dim, input_dim),
@@ -1395,8 +1526,10 @@ class ScOT(Swinv2PreTrainedModel):
             return_dict=return_dict,
         )
 
+        #print("DECODER OUTPUT!!!!!!!", decoder_output[0].shape)
         sequence_output = decoder_output[0]
         prediction = self.patch_recovery(sequence_output)
+
         # The following can be used for learning just the residual for time-dependent problems
         if self.config.learn_residual:
             if self.config.num_channels > self.config.num_out_channels:
