@@ -58,7 +58,6 @@ from scOT.layers.normalization import LayerNorm, ConditionalLayerNorm
 from transformerTS import TransformerTS
 from scOT.layers.self_attention import AttentionLayer, FullAttention
 
-
 @dataclass
 class ScOTOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
