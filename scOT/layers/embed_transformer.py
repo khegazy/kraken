@@ -61,6 +61,25 @@ class FixedEmbedding(nn.Module):
         return self.emb(x).detach()
 
 
+class ContinuousTemporalEmbedding(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+
+        div_term = (torch.arange(0, d_model, 2).float()
+            * -(math.log(10000.0) / d_model)).exp().unsqueeze(0).unsqueeze(0)
+        self.div_term = nn.Parameter(div_term, requires_grad=False)
+
+    def forward(self, times):
+        embeds = torch.concatenate(
+            [
+                torch.sin(times.unsqueeze(-1)*self.div_term),
+                torch.cos(times.unsqueeze(-1)*self.div_term)
+            ],
+            dim=-1,
+        )
+        return embeds.unsqueeze(-2).detach()
+
+
 class TemporalEmbedding(nn.Module):
     def __init__(self, d_model, embed_type='fixed', freq='h'):
         super(TemporalEmbedding, self).__init__()

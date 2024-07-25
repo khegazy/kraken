@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from scOT.layers.transformer import Decoder, DecoderLayer, Encoder, EncoderLayer, ConvLayer
 from scOT.layers.self_attention import FullAttention, AttentionLayer
 from scOT.layers.normalization import ConditionalLayerNorm
+from scOT.layers.embed_transformer import ContinuousTemporalEmbedding
 
 
 class TransformerTS(nn.Module):
@@ -11,6 +12,9 @@ class TransformerTS(nn.Module):
         super().__init__()
         #self.output_attention = configs.output_attention
         self.output_attention = False
+
+        # Temporal Embedding
+        self.embedding = ContinuousTemporalEmbedding(embed_dim)
 
         # Encoder
         self.encoder = Encoder(
@@ -30,8 +34,9 @@ class TransformerTS(nn.Module):
         )
     
     def forward(self, x, time):
-        #print("INPUT ATTN", x.shape)
-        enc_out, attns = self.encoder(x, time, attn_mask=None)
+        #print("INPUT ATTN", x.shape, time.shape, self.embedding(time).shape)
+        embeds = x + self.embedding(time)
+        enc_out, attns = self.encoder(embeds, time, attn_mask=None)
         #print("OUTPUT ATTN", enc_out.shape)
         return enc_out
 
