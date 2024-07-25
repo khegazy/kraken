@@ -187,15 +187,15 @@ class RayleighTaylor(BaseTimeDataset):
             "pixel_mask": self.pixel_mask,
         }
 
-
 class CompressibleBase(BaseTimeDataset):
     def __init__(self, file_path, *args, tracer=False, **kwargs):
         super().__init__(*args, **kwargs)
-        assert self.max_num_time_steps * self.time_step_size <= 20
+        assert self.input_time_len + self.max_num_time_steps * self.time_step_size <= 20
 
-        self.N_max = 10000
-        self.N_val = 120
-        self.N_test = 240
+        print("CHANGED DATASET SIZE, GO BACK!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self.N_max = 200 #10000
+        self.N_val = 30 #120
+        self.N_test = 20 #240
         self.resolution = 128
         self.tracer = tracer
 
@@ -220,12 +220,13 @@ class CompressibleBase(BaseTimeDataset):
 
     def __getitem__(self, idx):
         i, t, t1, t2 = self._idx_map(idx)
+        t = t + ((self.input_time_len - 1) - torch.arange(self.input_time_len))
         time = t / self.constants["time"]
 
         inputs = (
-            torch.from_numpy(self.reader["data"][i + self.start, t1, 0:4])
+            torch.from_numpy(self.reader["data"][i + self.start, t1-self.input_time_len:t1, 0:4])
             .type(torch.float32)
-            .reshape(4, self.resolution, self.resolution)
+            .reshape(self.input_time_len, 4, self.resolution, self.resolution)
         )
         label = (
             torch.from_numpy(self.reader["data"][i + self.start, t2, 0:4])
@@ -233,7 +234,7 @@ class CompressibleBase(BaseTimeDataset):
             .reshape(4, self.resolution, self.resolution)
         )
 
-        inputs[3] = inputs[3] - self.mean_pressure
+        inputs[:,3] = inputs[:,3] - self.mean_pressure
         label[3] = label[3] - self.mean_pressure
 
         inputs = (inputs - self.constants["mean"]) / self.constants["std"]
@@ -241,12 +242,12 @@ class CompressibleBase(BaseTimeDataset):
 
         if self.tracer:
             input_tracer = (
-                torch.from_numpy(self.reader["data"][i + self.start, t1, 4:5])
+                torch.from_numpy(self.reader["data"][i + self.start, t1:t1+self.input_time_len, 4:5])
                 .type(torch.float32)
                 .reshape(1, self.resolution, self.resolution)
             )
             output_tracer = (
-                torch.from_numpy(self.reader["data"][i + self.start, t2, 4:5])
+                torch.from_numpy(self.reader["data"][i + self.start, t2+self.input_time_len, 4:5])
                 .type(torch.float32)
                 .reshape(1, self.resolution, self.resolution)
             )
@@ -259,6 +260,79 @@ class CompressibleBase(BaseTimeDataset):
             "time": time,
             "pixel_mask": self.pixel_mask,
         }
+
+
+# class CompressibleBase(BaseTimeDataset):
+#     def __init__(self, file_path, *args, tracer=False, **kwargs):
+#         super().__init__(*args, **kwargs)
+#         assert self.max_num_time_steps * self.time_step_size <= 20
+
+#         self.N_max = 10000
+#         self.N_val = 120
+#         self.N_test = 240
+#         self.resolution = 128
+#         self.tracer = tracer
+
+#         data_path = self.data_path + file_path
+#         data_path = self._move_to_local_scratch(data_path)
+#         self.reader = h5py.File(data_path, "r")
+
+#         self.constants = copy.deepcopy(CONSTANTS)
+
+#         self.input_dim = 4 if not tracer else 5
+#         self.label_description = (
+#             "[rho],[u,v],[p]" if not tracer else "[rho],[u,v],[p],[tracer]"
+#         )
+
+#         self.pixel_mask = (
+#             torch.tensor([False, False, False, False])
+#             if not tracer
+#             else torch.tensor([False, False, False, False, False])
+#         )
+
+#         self.post_init()
+
+#     def __getitem__(self, idx):
+#         i, t, t1, t2 = self._idx_map(idx)
+#         time = t / self.constants["time"]
+
+#         inputs = (
+#             torch.from_numpy(self.reader["data"][i + self.start, t1, 0:4])
+#             .type(torch.float32)
+#             .reshape(4, self.resolution, self.resolution)
+#         )
+#         label = (
+#             torch.from_numpy(self.reader["data"][i + self.start, t2, 0:4])
+#             .type(torch.float32)
+#             .reshape(4, self.resolution, self.resolution)
+#         )
+
+#         inputs[3] = inputs[3] - self.mean_pressure
+#         label[3] = label[3] - self.mean_pressure
+
+#         inputs = (inputs - self.constants["mean"]) / self.constants["std"]
+#         label = (label - self.constants["mean"]) / self.constants["std"]
+
+#         if self.tracer:
+#             input_tracer = (
+#                 torch.from_numpy(self.reader["data"][i + self.start, t1, 4:5])
+#                 .type(torch.float32)
+#                 .reshape(1, self.resolution, self.resolution)
+#             )
+#             output_tracer = (
+#                 torch.from_numpy(self.reader["data"][i + self.start, t2, 4:5])
+#                 .type(torch.float32)
+#                 .reshape(1, self.resolution, self.resolution)
+#             )
+#             inputs = torch.cat([inputs, input_tracer], dim=0)
+#             label = torch.cat([label, output_tracer], dim=0)
+
+#         return {
+#             "pixel_values": inputs,
+#             "labels": label,
+#             "time": time,
+#             "pixel_mask": self.pixel_mask,
+#         }
 
 
 class Gaussians(CompressibleBase):
