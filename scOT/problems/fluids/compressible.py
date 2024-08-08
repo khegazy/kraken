@@ -193,10 +193,10 @@ class CompressibleBase(BaseTimeDataset):
         super().__init__(*args, **kwargs)
         assert self.input_time_len + self.max_num_time_steps * self.time_step_size <= 20
 
-        print("CHANGED DATASET SIZE, GO BACK!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        self.N_max = 200 #10000
-        self.N_val = 30 #120
-        self.N_test = 20 #240
+        #print("CHANGED DATASET SIZE, GO BACK!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self.N_max = 10000
+        self.N_val = 120
+        self.N_test = 240
         self.resolution = 128
         self.tracer = tracer
 

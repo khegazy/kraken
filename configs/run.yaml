@@ -1,7 +1,7 @@
 dataset:
-  value: "fluids.compressible.Gaussians"
+  value: "fluids.compressible.Riemann"
 input_time_len:
-  value: 4
+  value: 5
 num_trajectories:
   value: 128
 model_name:
@@ -9,7 +9,7 @@ model_name:
 residual_model:
   value: "transformer"
 lr:
-  value: 0.00005
+  value: 0.0005
 lr_embedding_recovery:
   value: 0.0005
 lr_time_embedding:

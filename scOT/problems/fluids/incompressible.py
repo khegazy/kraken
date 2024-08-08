@@ -43,7 +43,9 @@ class IncompressibleBase(BaseTimeDataset):
             self.constants["std"] = self.constants["std"][1:3]
 
         self.density = torch.ones(1, self.resolution, self.resolution)
+        self.density_TS = torch.ones(self.input_time_len, 1, self.resolution, self.resolution)
         self.pressure = torch.zeros(1, self.resolution, self.resolution)
+        self.pressure_TS = torch.zeros(self.input_time_len, 1, self.resolution, self.resolution)
 
         self.input_dim = 4 if not tracer else 5
         if just_velocities:
@@ -73,6 +75,8 @@ class IncompressibleBase(BaseTimeDataset):
         self.post_init()
 
     def _downsample(self, image, target_size):
+        print("DOWNSAMPLING LIKELY IS BROKEN DUE TO ADDITION OF TIME AXIS!!!!!!")
+        adsfasdf
         image = image.unsqueeze(0)
         image_size = image.shape[-2]
         freqs = torch.fft.fftfreq(image_size, d=1 / image_size)
@@ -87,9 +91,9 @@ class IncompressibleBase(BaseTimeDataset):
         time = t / self.constants["time"]
 
         inputs_v = (
-            torch.from_numpy(self.reader["velocity"][i + self.start, t1, 0:2])
+            torch.from_numpy(self.reader["velocity"][i + self.start, t1-self.input_time_len:t1, 0:2])
             .type(torch.float32)
-            .reshape(2, self.resolution, self.resolution)
+            .reshape(self.input_time_len, 2, self.resolution, self.resolution)
         )
         label_v = (
             torch.from_numpy(self.reader["velocity"][i + self.start, t2, 0:2])
@@ -101,7 +105,7 @@ class IncompressibleBase(BaseTimeDataset):
             label_v = label_v.transpose(-2, -1)
 
         if not self.just_velocities:
-            inputs = torch.cat([self.density, inputs_v, self.pressure], dim=0)
+            inputs = torch.cat([self.density_TS, inputs_v, self.pressure_TS], dim=1)
             label = torch.cat([self.density, label_v, self.pressure], dim=0)
         else:
             inputs = inputs_v
@@ -112,7 +116,7 @@ class IncompressibleBase(BaseTimeDataset):
 
         if self.tracer:
             input_tracer = (
-                torch.from_numpy(self.reader["velocity"][i + self.start, t1, 2:3])
+                torch.from_numpy(self.reader["velocity"][i + self.start, t1-self.input_time_len:t1, 2:3])
                 .type(torch.float32)
                 .reshape(1, self.resolution, self.resolution)
             )
@@ -131,7 +135,7 @@ class IncompressibleBase(BaseTimeDataset):
                 output_tracer - self.constants["tracer_mean"]
             ) / self.constants["tracer_std"]
 
-            inputs = torch.cat([inputs, input_tracer], dim=0)
+            inputs = torch.cat([inputs, input_tracer], dim=1)
             label = torch.cat([label, output_tracer], dim=0)
 
         if self.res is not None:

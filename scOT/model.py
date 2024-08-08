@@ -101,7 +101,7 @@ class ScOTConfig(PretrainedConfig):
         p=1,  # for loss: 1 for l1, 2 for l2
         channel_slice_list_normalized_loss=None,  # if None will fall back to absolute loss otherwise normalized loss with split channels
         residual_model="convnext",  # "convnext" or "resnet"
-        num_residual_layers=2,
+        num_residual_layers=7,
         num_res_attn_heads=4,
         use_conditioning=False,
         learn_residual=False,  # learn the residual for time-dependent problems
